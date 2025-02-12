@@ -114,7 +114,7 @@ u for UEFI	b for BIOS	Leave blank for $BOOT_MODE"
 
 	# Determine swap size based on RAM and disk size
 	RAM_MB=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)
-	DISK_MB=$(lsblk -bno SIZE "$SELECTED_DISK" | awk '{print int($1 / (1024*1024))}')
+	DISK_MB=$(lsblk -bno SIZE "$SELECTED_DISK" | head -n 1 | awk '{print int($1 / (1024*1024))}')
 	if ((RAM_MB < 2048)); then
 		SWAP_SIZE=$RAM_MB * 2
 	elif ((RAM_MB < 8192)); then
@@ -128,11 +128,14 @@ u for UEFI	b for BIOS	Leave blank for $BOOT_MODE"
 		exit 1
 	fi
 
-#	if [[ SWAP_SIZE * 4 > DISK_MB ]]; then
-#		SWAP_SIZE=DISK_MB/4
-#	fi
+	echo $SWAP_SIZE
+	echo $DISK_MB
 
-	echo "Recommended swap size: $SWAP_SIZE"
+	if [[ $(($SWAP_SIZE * 4)) -gt $DISK_MB ]]; then
+		SWAP_SIZE=$(($DISK_MB / 4))
+	fi
+
+	echo "Recommended swap size: $SWAP_SIZE M"
 
 	read -rp "enter to continue" ENTER
 
@@ -141,21 +144,25 @@ u for UEFI	b for BIOS	Leave blank for $BOOT_MODE"
 	parted -s "$SELECTED_DISK" mklabel gpt
 
 	# Create boot partition
-	if [[ "$BOOT_SELECTION" == "uefi" ]]; then
+	if [[ "$BOOT_MODE" == "UEFI" ]]; then
 		parted -s "$SELECTED_DISK" mkpart ESP fat32 1MiB 512MiB
 		parted -s "$SELECTED_DISK" set 1 esp on
-	elif [[ "$BOOT_SELECTION" == "bios" ]]; then
-		parted -s "$SELECTED_DISK" mkpart primary 1MiB 2MiB # BIOS boot partition (for GPT)
+	elif [[ "$BOOT_MODE" == "BIOS" ]]; then
+		parted -s "$SELECTED_DISK" mkpart primary 1MiB 512MiB # BIOS boot partition (for GPT)
 		parted -s "$SELECTED_DISK" set 1 bios_grub on
 	fi
 
-	# Create root partition (all remaining space except swap)
-	parted -s "$SELECTED_DISK" mkpart primary ext4 512MiB -${SWAP_SIZE}
+	# Create swap partition
+	parted -s "$SELECTED_DISK" mkpart primary linux-swap 512MiB $((${SWAP_SIZE}+512))Mib
 
-	# Create swap partition at the end
-	parted -s "$SELECTED_DISK" mkpart primary linux-swap -${SWAP_SIZE} 100%
+	# Create root partition (all remaining space)
+	parted -s "$SELECTED_DISK" mkpart primary ext4 $((${SWAP_SIZE} + 512))Mib 100%
 
 	echo "Partitioning complete!"
+
+	export BOOTPART=($(lsblk -rpo NAME "$SELECTED_DISK" | sed -n '3p'))
+	export SWAPPART=($(lsblk -rpo NAME "$SELECTED_DISK" | sed -n '4p'))
+	export ROOTPART=($(lsblk -rpo NAME "$SELECTED_DISK" | sed -n '5p'))
 
 # Partition a section
 elif [ "$PARTCHOICE" == 2 ]; then
@@ -198,6 +205,7 @@ echo "$ROOTPART"
 read -rp "Enter to continue" ENTER
 
 export ROOTUUID=$(blkid $ROOTPART | awk -F '"' '{print $2}')
+export SWAPUUID=$(blkid $SWAPPART | awk -F '"' '{print $2}')
 
 mkdir /mntSq
 umount $ROOTPART
@@ -215,6 +223,7 @@ rm /mntSq/Square.ch
 rm /mntSq/etc/network/interfaces
 cp /etc/network/interfaces /mntSq/etc/network/interfaces
 echo $ROOTUUID
-echo "UUID=$ROOTUUID / ext4 defaults 0 1" >/mntSq/etc/fstab
+echo "UUID=$ROOTUUID / ext4 defaults 0 1" > /mntSq/etc/fstab
+echo "UUID=$SWAPUUID none swap sw 0 0" >> /mntSq/etc/fstab
 
 update-grub
